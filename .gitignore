@@ -1,0 +1,11 @@
+# 本插件零依赖、无构建步骤，以下条目只是兜底
+node_modules/
+*.tgz
+*.log
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

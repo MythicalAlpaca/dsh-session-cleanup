@@ -1,0 +1,16 @@
+# The dsh-session-cleanup bundle patch: one insert over whatever the earlier
+# bundle layers (dsh-base, dsh-web-app) already mounted. Applied after them,
+# before the profile's own cordis.patch.yml and any --patch overlays, so a
+# profile can still address this row by id:
+#
+#   - id: session-cleanup
+#     config:
+#       autoCleanup: true
+#       autoKeepLatest: 50
+#
+# The row owns no UI and mounts no client half; it registers the
+# `session_cleanup` tool and the `sessionCleanup` service.
+
+- insert:
+    - id: session-cleanup
+      name: dsh-session-cleanup
