@@ -63,7 +63,7 @@ git push -u origin main
 
 侧边栏里每个会话行都有一个 `...` 菜单（置顶 / 重命名 / 派生 / 归档）。装好本插件后，菜单末尾会多出一项带垃圾桶图标的**「删除会话」**（`order: 500`，排在归档 `400` 之后、以分隔线分组）。
 
-- **两段确认**：第一次点击只是「上膛」，行文字变成「再次点击确认删除」，8 秒不点会自动解除；再点一次才真正删除。删除成功后菜单关闭、该行从列表消失；失败（例如会话正在运行）时菜单保持打开，并**直接在该行显示原因**，例如「删除会话：未删除：该会话正在运行，当前回合尚未结束」。
+- **两段确认**：第一次点击只是「上膛」，行文字变成「再次点击确认删除」，8 秒不点会自动解除；再点一次才真正删除。删除成功后菜单关闭、该行立即从列表消失，无需刷新页面或重启；失败（例如会话正在运行）时菜单保持打开，并**直接在该行显示原因**，例如「删除会话：未删除：该会话正在运行，当前回合尚未结束」。
 - **先由浏览器半边拦一次**：正在面板中打开的那个会话、正在运行的会话、还有待发送消息的会话，在第一次点击时就地给出原因（而不是等第二次点击后才被 Host 拒绝）——分别提示「该会话正在面板中打开，请先切换到其他会话」「该会话正在运行，请等它结束后再删除」「该会话还有待发送的消息，请先处理或清空」。
 - **它删的是整条会话记录**：会话日志目录 + 投影缓存 + 工作区置顶/归档引用 + 工作区缓存的会话索引，与工具 `apply` 的行为完全一致。
 - **安全规则不打折**：仍然拒绝正在运行的会话、拒绝删除当前发起清理的会话、拒绝目录里出现未知条目的会话，也仍然只删「能反解回该 id 的确切会话目录」。
@@ -75,6 +75,7 @@ git push -u origin main
 | 声明浏览器半边 | `package.json`：`dsh.client = { "platform": "web" }` + `exports["./client"] = "./lib/client.js"`；Host 的 `dsh-client-modules` 把该文件作为插件模块服务于 `/plugins/<包名>/…`，并写进 `window.__DSH_BOOT__` | Loader 行被移除后，模块从启动图与模块表中一并消失 |
 | 注册功能项 | 浏览器半边的 `ctx.slots.register({ name: "sidebar.workspaces.session.menu.item", id: "session-cleanup", order: 500, locale: "session-cleanup" }, 组件)`（先 `ctx.slots.inject(槽位, …)` 等槽位出现） | 注册绑在本插件 fiber 上，随插件卸载自动注销 |
 | 执行删除 | 浏览器半边 `POST api/session-cleanup.delete`（文档相对路径）→ Host 半边用 `ctx.connection.fetch.register({ path: "/api/session-cleanup.delete", methods: ["POST"], requestBody: "buffered" })` 注册的路由 → 复用 `runCleanup` | 路由注册同样落在本插件 fiber 上，随插件卸载注销，`/api` 前缀仍由 Connection 服务做 Host/Origin 与浏览器鉴权 |
+| 同步列表 | 确认日志目录已删除后，宿主通过 DSH 已有的 `api-session/removed` 事件通知在线列表（包括通过工具和自动保留策略删除的情况）；菜单成功响应会对仍可见的行做一次补充刷取 | 不新增传输接口；宿主列表过滤随插件卸载撤销 |
 | 文案 | 浏览器半边 `ctx.locale.register("session-cleanup", { zh, en })` | 字典随插件注销 |
 
 请求 / 响应契约（浏览器半边就是照这个调的）：
@@ -89,7 +90,7 @@ git push -u origin main
   "protected": [], "notes": [] }
 ```
 
-> 只把浏览器半边接进来是不够的：Host 半边必须也加载了新代码。已加载过的插件模块会被 Node 的 ESM 缓存复用（本插件目录不在 HMR 模块根内），因此**改过源码后需要重启 Harness**，重启后再刷新页面即可看到功能项并正常使用。
+> 此功能需要宿主和浏览器都加载 0.1.1 或更高版本。更新安装后若页面还加载旧插件，可刷新一次页面；日常删除不需要刷新或重启。若插件管理器报告「需要重启」，则依宿主的提示完成这一次插件更新。
 
 ## 模型侧用法：`session_cleanup` 工具
 
@@ -134,7 +135,7 @@ session_cleanup { "mode": "apply",   "keepLatest": 10, "limit": 5 }# 每次最�
 | `limit` | 50 | 单次调用最多删除的条数（上限 500）；候选超限时**优先删除最久远的记录**，其余留待下次 |
 | `allowForeignEntries` | `false` | 允许删除含未知文件的会话目录（默认拒绝） |
 | `pruneEmptyProjects` | `true` | 删除后被清空的项目目录一并移除（不会删除 sessions 根目录） |
-| `pruneWorkspaceIndex` | `true` | 同步丢弃工作区注册表缓存的会话索引项，使运行中的侧边栏立即不再显示 |
+| `pruneWorkspaceIndex` | `true` | 移除工作区成员引用并清理缓存索引；不影响成功删除后的会话列表通知 |
 
 必须给出 `sessionIds`、`keepLatest`、`olderThanDays` 三者之一，否则不会选中任何目标。其中 `sessionIds` 是**显式选择**，优先级最高：同时给出时 `keepLatest` 与 `olderThanDays` 会被忽略（保护规则仍然生效）。
 
@@ -158,11 +159,11 @@ session_cleanup { "mode": "apply",   "keepLatest": 10, "limit": 5 }# 每次最�
 | 会话日志目录 `<root>/--cwd--/<id>/` | 递归删除 |
 | 投影缓存 `storages/session_projcache/sessions/<id>.json` | 经 `ctx.storageDomain` 的 `session_projcache` 域删除（保持内存与介质一致），并兜底清理残留文件 |
 | 工作区 `pinnedSessionIds` / `archivedSessionIds` | 调用 `unpinSession` / `unarchiveSession` 移除引用（二者对已不存在的 id 是幂等的） |
-| 工作区注册表缓存的 `sessionPaths` / `headers` | 丢弃该 id 的索引项，使运行中的 GUI 立即停显 |
+| 工作区注册表缓存的 `sessionPaths` / `headers` 等 | 丢弃该 id 的索引项 |
 | SQLite FTS 全文索引 | **不动**。它是可丢弃的派生索引，会在下一次稳定观察时对账掉已删除的来源 |
-| `workspace.json` 里持久化的 `sessionIds` 顺序 | **不直接改写**：`sessionIds` 在读取时按索引过滤，下一次变更持久化时剪除无效项（DSH 既有语义） |
+| 工作区已保存的 `sessionIds` | 用 `Workspace.detachSession(id)` 移除成员并通知订阅者，其余会话顺序不变 |
 
-删除后，`sessionIds` 中的残留 id 不会让会话重新出现；其日志与缓存都已不存在。
+在 DSH 0.2.2-rc.5 上，宿主还会过滤已删除但仍驻留内存的原会话对象，避免重新拉取列表或重新连接时复现；不会终止该对象或影响以后同 ID 的新会话。
 
 ## 可选配置（自动保留策略）
 
@@ -207,14 +208,14 @@ node test/cleanup.smoke.mjs
 - **中文说明**：插件管理页显示的包描述已改为中文，且是**实时生效**（每次列表都重新读取 `package.json`）。工具说明、参数说明与结果渲染文本同样是中文，但要等 Harness 重启后才在界面上可见。
 - **冒烟测试**：`node test/cleanup.smoke.mjs` 全部通过（含「工具说明必须是中文、API 取值必须保持英文」的断言，以及上面新增的 Web 路由与浏览器半边用例）。
 - **缺陷修复：侧边栏删除任意会话都报「活跃会话」**。现象：点删除后返回「未删除：活跃会话」，几乎所有会话都删不掉。定位：让一个**新开的 agent** 调 `session_cleanup{"mode":"preview","keepLatest":100}`（新 agent 的工具集是现组装的，能拿到该工具）——语料共 4 条记录，**4 条全部受保护**（1 条是调用方会话，3 条判为「活跃会话」，其中包含本会话本身）。原因：`ctx.sessionQuery.listSessions()` 的 `live` 只表示**宿主内存里还持有这个会话对象**，而桌面客户端只要在界面里打开过某个会话、就会一直持有它的一代引用；旧规则 `record.live → 拒绝` 因此退化成「凡是能在侧边栏点到的会话都不能删」。反证：直接用独占方式打开这 4 个会话的日志文件全部成功，说明它们并没有被写入方占用，删除在文件系统层面完全可行。修复：判据换成**运行状态**（`ctx.agents.get(id).status`，无驱动时回退读日志尾部的 `turn/start`/`turn/end`），并把「图形界面正在显示的那个会话」交给浏览器半边就地拦截；活跃但空闲的会话现在可以正常删除，结果里会附一条提示。
-- **界面功能项（已上线）**：`dsh.client` 声明、`lib/client.js`、槽位 `sidebar.workspaces.session.menu.item`（`id: session-cleanup`、`order: 500`）与 Host 路由 `/api/session-cleanup.delete` 均已按上述契约实现并通过单测；已在真实 GUI 上跑通（菜单里出现「删除会话」，且能走到 Host 并收到 Host 侧的中文拒绝文案）。**注意：`set_plugin` 只重跑 `apply`、不会重新读取源码**（Node ESM 按解析后的 URL 缓存模块；本插件目录也不在 HMR 模块根内），所以每次改源码后都要**重启 Harness** 才生效；而新开的 agent 的工具集是现组装的，可以用一个新 subagent 调 `session_cleanup` 来复核 Host 侧规则。
+- **界面功能项（已上线）**：`dsh.client` 声明、`lib/client.js`、槽位 `sidebar.workspaces.session.menu.item`（`id: session-cleanup`、`order: 500`）与 Host 路由 `/api/session-cleanup.delete` 均已按上述契约实现并通过单测；已在真实 GUI 上跑通（菜单里出现「删除会话」，且能走到 Host 并收到 Host 侧的中文拒绝文案）。新开的 agent 的工具集是现组装的，可以用一个新 subagent 调 `session_cleanup` 来复核 Host 侧规则。
 
-> 提示：插件源码改动后需要重启 Harness 才会生效——本插件目录不在 HMR 监视的模块根（`hmr.root` 为空）内，而且 Node 的 ESM 模块缓存会按解析后的 URL 复用已加载的模块（实测：停用再启用只会重新执行 `apply`，不会重新读取源码）。
+> 从本地 `.tgz` 安装的旧版本可用新版归档替换；确认插件管理器报告「已应用」后，再刷新已打开的页面一次以加载新客户端。
 
 ## 已知限制
 
 - **不触碰全文索引**：若部署把 `session-query-sqlite` 的 `openAt` 设为 `startup` 并持久化了索引路径，被删会话仍会出现在索引里，直到下一次搜索触发对账。
 - **删除不可恢复**：没有回收站、没有导出；需要先备份时请使用 DSH 的会话日志导出能力。
-- **运行中的会话行**：`pruneWorkspaceIndex` 依赖工作区注册表的缓存字段名（`sessionPaths` / `headers`）。若未来该实现改名，仅这一步静默跳过，会话行会在下次重启或索引重建后消失。
+- **宿主版本兼容**：即时通知和内存行过滤使用 DSH 0.2.2-rc.5 的 Session Controller。其他版本若缺少这些接口，工作区清理和磁盘删除仍可用，但即时停显不作保证。
 - **子会话**：删除父会话不会连带删除其子代理会话记录，它们会作为独立记录留在 `corpus` 中（可再用 `sessionIds` 指定删除）。
-- **单进程**：与持久化写入方没有跨进程协调；引擎拒绝**正在运行回合**的会话，因此正常使用下不会与写句柄竞争（JSONL 后端只在追加时打开文件）。但被删的会话若仍被客户端保留（界面里打开过），它的会话对象会继续留在宿主内存中直到被释放：请刷新页面，并且不要再向已删除的会话发送消息。
+- **单进程**：与持久化写入方没有跨进程协调；引擎拒绝**正在运行回合**的会话，因此正常使用下不会与写句柄竞争（JSONL 后端只在追加时打开文件）。但被删的会话若仍被客户端保留（界面里打开过），它的会话对象会继续留在宿主内存中直到被释放：插件会从列表中排除该对象，但不会替其他插件关闭它；请不要再通过旧标签页或旧会话链接向已删除的会话发送消息。

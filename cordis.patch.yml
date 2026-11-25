@@ -8,8 +8,7 @@
 #       autoCleanup: true
 #       autoKeepLatest: 50
 #
-# The row owns no UI and mounts no client half; it registers the
-# `session_cleanup` tool and the `sessionCleanup` service.
+# This row installs the Host tool and route and mounts the declared Web client.
 
 - insert:
     - id: session-cleanup

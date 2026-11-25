@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-cleanup",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "DeepSeek Harness 会话记录清理插件：按保留策略删除持久化的会话日志，并清理引用它们的投影缓存行与工作区引用。由默认预览（不删除任何内容）的 session_cleanup 工具驱动；随插件安装，会话列表的“...”菜单中会出现“删除会话”功能项，卸载后随插件一并消失。",
   "keywords": [

@@ -20,6 +20,7 @@ import { join } from 'node:path';
 
 import { applyCleanup, planCleanup, runCleanup, sessionDirectory } from '../lib/cleanup.js';
 import { encodeSegment, projectKey } from '../lib/paths.js';
+import { filterSessionList } from '../lib/session-list.js';
 
 const CWD_A = process.platform === 'win32' ? 'C:\\project\\alpha' : '/project/alpha';
 const CWD_B = process.platform === 'win32' ? 'C:\\project\\beta' : '/project/beta';
@@ -160,15 +161,57 @@ console.log('apply: ok — freed', explicit.freedBytes, 'bytes; project pruned')
 // live for as long as it holds a retained generation (i.e. anything the GUI has
 // opened), so refusing every live session made the action unusable. The guard
 // must be the running turn, not the mere presence of a Session object.
-const idleLive = createContext({ live: ['session-live'] });
+const attached = { id: 'session-live' };
+const survivor = { id: 'session-new-a' };
+const sessionsById = new Map([[attached.id, attached], [survivor.id, survivor]]);
+class TestController {
+  async list(request, signal) {
+    assert.equal(this, controller);
+    assert.deepEqual(request, {});
+    assert.equal(signal, undefined);
+    return { items: Array.from(sessionsById.keys(), (sessionId) => ({ sessionId })), other: 'preserved' };
+  }
+}
+const controller = new TestController();
+const events = [];
+const memberIds = ['session-live', 'session-new-a'];
+const sessionPaths = new Map([['session-live', CWD_A]]);
+const workspace = {
+  sessionIds: memberIds,
+  async detachSession(id) {
+    assert.ok(sessionPaths.has(id), 'detach must precede index invalidation');
+    assert.equal(id, 'session-live');
+    memberIds.splice(memberIds.indexOf(id), 1);
+  },
+};
+const idleLive = createContext({ live: ['session-live'], services: {
+  sessions: { get: (id) => sessionsById.get(id) },
+  sessionController: { [Symbol.for('cordis.original')]: controller },
+  workspaceRegistry: { list: () => [workspace], sessionPaths },
+} });
+idleLive.emit = (event, id) => {
+  assert.ok(!existsSync(sessionDirectory(root, CWD_A, id)), 'publish only after deletion');
+  events.push([event, id]);
+};
+const disposeFilter = filterSessionList(idleLive);
+assert.equal((await controller.list({})).items.length, 2);
 const idlePlan = await planCleanup(idleLive, {}, { sessionIds: ['session-live'] });
 assert.deepEqual(idlePlan.targets.map((target) => target.id), ['session-live']);
 assert.equal(idlePlan.protected.size, 0);
 assert.match(idlePlan.notes.join(' '), /1 条目标在宿主内存中仍被保留/);
+assert.deepEqual(events, [], 'preview must not emit a removal');
 const idleApply = await runCleanup(idleLive, {}, { mode: 'apply', sessionIds: ['session-live'] });
 assert.equal(idleApply.deleted, 1);
 assert.ok(!existsSync(sessionDirectory(root, CWD_A, 'session-live')), 'a live-but-idle session must be deletable');
-console.log('live but idle: ok — deleted the retained session');
+assert.deepEqual(events, [['api-session/removed', 'session-live']]);
+assert.deepEqual(memberIds, ['session-new-a']);
+assert.equal(sessionPaths.has('session-live'), false);
+assert.deepEqual(await controller.list({}), { items: [{ sessionId: 'session-new-a' }], other: 'preserved' });
+sessionsById.set(attached.id, { id: attached.id });
+assert.equal((await controller.list({})).items.length, 2, 'a replacement generation with the same id must not be hidden');
+disposeFilter();
+assert.equal(Object.hasOwn(controller, 'list'), false, 'unload must restore the original method');
+console.log('live but idle: ok — deletion published, membership detached, and stale baseline filtered');
 
 // --- a live session without a driver is refused by its own open turn ---------
 const agentless = createContext({ live: ['session-new-a'], agentless: ['session-new-a'] });
@@ -312,6 +355,7 @@ const webRecords = [
 ];
 
 const activeRoutes = [];
+const webEvents = [];
 const fiberDisposers = [];
 const connectionService = {
   fetch: {
@@ -329,6 +373,7 @@ const connectionService = {
   },
 };
 const routeCtx = {
+  emit: (...args) => webEvents.push(args),
   get(serviceName) {
     if (serviceName === 'connection') return connectionService;
     if (serviceName === 'agents') {
@@ -352,6 +397,7 @@ const routeCtx = {
   provide: () => {},
   tools: { register: () => () => {} },
   inject: (dependencies, callback) => {
+    if (dependencies[0] === 'sessionController') return;
     assert.deepEqual(dependencies, ['connection'], 'the route must be installed only when the Web transport is present');
     callback({ connection: connectionService, get: (name) => routeCtx.get(name) });
   },
@@ -400,7 +446,8 @@ assert.ok(existsSync(webLive.directory), 'the route must never delete a live ses
 const unknownRefusal = await post({ sessionIds: ['session-web-gone'] });
 assert.equal(unknownRefusal.status, 409);
 assert.match(unknownRefusal.body.message, /不存在对应记录/);
-console.log('web route: ok — deleted the selection, refused live/unknown, rejected bad input');
+assert.deepEqual(webEvents, [['api-session/removed', 'session-web-victim']], 'failed deletes must never emit removal');
+console.log('web route: ok — deleted and notified only the successful selection');
 
 // --- unloading the plugin removes the route ---------------------------------
 // The Connection service lands a registered route on the calling fiber; the
@@ -493,7 +540,7 @@ globalThis.fetch = async (url, init) => {
     return new Response('not found', { status: 404 });
   }
   const refused = id === 'session-web-live';
-  return new Response(JSON.stringify(refused ? { ok: false, message: '未删除：该会话正在运行，当前回合尚未结束' } : { ok: true, message: '已删除 1 条会话记录' }), {
+  return new Response(JSON.stringify(refused ? { ok: false, message: '未删除：该会话正在运行，当前回合尚未结束' } : { ok: true, message: '已删除 1 条会话记录', targets: [{ id: id === 'session-unconfirmed' ? 'another-session' : id, deleted: true }] }), {
     status: refused ? 409 : 200,
     headers: { 'content-type': 'application/json' },
   });
@@ -507,6 +554,25 @@ await assert.rejects(() => injected.deleteSession('session-web-live'), /未删�
 // A 404 means the Host half that owns the route is not the loaded one; the row
 // must name that instead of showing a bare HTTP status.
 await assert.rejects(() => injected.deleteSession('session-route-missing'), (error) => error.code === 'route-missing');
+
+let refreshCalls = 0;
+let ids = ['session-web-victim', 'session-web-live'];
+browserPlugin.apply({ ...clientCtx, get: (name) => name === 'sessions' ? {
+  list: { getSnapshot: () => ({ ids }) },
+  async refresh() {
+    refreshCalls += 1;
+    if (refreshCalls === 2) ids = ids.filter((id) => id !== 'session-web-victim');
+  },
+} : undefined });
+const refreshingDelete = registrations.at(-1).definition.inject().deleteSession;
+await assert.rejects(() => refreshingDelete('session-unconfirmed'), /未得到宿主确认/);
+await assert.rejects(() => refreshingDelete('session-web-live'), /正在运行/);
+assert.equal(refreshCalls, 0);
+await refreshingDelete('session-web-victim');
+assert.equal(refreshCalls, 2, 'retry once after a stale in-flight list refresh');
+assert.deepEqual(ids, ['session-web-live']);
+await refreshingDelete('session-web-victim');
+assert.equal(refreshCalls, 2, 'do not pull again when already removed by the Host event');
 
 let menuOpen = true;
 const menuProps = {
@@ -574,7 +640,7 @@ const guardSessions = {
     : undefined),
 };
 browserPlugin.apply({ ...clientCtx, get: (name) => (name === 'sessions' ? guardSessions : undefined) });
-const guarded = registrations[1];
+const guarded = registrations.at(-1);
 const guardedInjected = guarded.definition.inject();
 const guardedProps = { ...menuProps, deleteSession: guardedInjected.deleteSession, localRefusal: guardedInjected.localRefusal };
 
